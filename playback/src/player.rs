@@ -499,12 +499,17 @@ impl Player {
     pub async fn await_end_of_track(&self) {
         let mut channel = self.get_player_event_channel();
         while let Some(event) = channel.recv().await {
-            if matches!(
-                event,
-                PlayerEvent::EndOfTrack { .. } | PlayerEvent::Stopped { .. }
-            ) {
-                return;
+            match event {
+                PlayerEvent::Stopped { .. } => info!("Track stopped"),
+                PlayerEvent::EndOfTrack { .. } => info!("End of track"),
+                _ => (),
             }
+            // if matches!(
+            //     event,
+            //     PlayerEvent::EndOfTrack { .. } | PlayerEvent::Stopped { .. }
+            // ) {
+            //     return;
+            // }
         }
     }
 
