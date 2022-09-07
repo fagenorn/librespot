@@ -131,7 +131,7 @@ impl Session {
         &self,
         credentials: Credentials,
         store_credentials: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Credentials, Error> {
         let (reusable_credentials, transport) = loop {
             let ap = self.apresolver().resolve("accesspoint").await?;
             info!("Connecting to AP \"{}:{}\"", ap.0, ap.1);
@@ -187,7 +187,7 @@ impl Session {
             }
         });
 
-        Ok(())
+        Ok(reusable_credentials)
     }
 
     pub fn apresolver(&self) -> &ApResolver {
