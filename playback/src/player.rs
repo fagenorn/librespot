@@ -113,6 +113,23 @@ enum PlayerCommand {
     SetSinkEventCallback(Option<SinkEventCallback>),
     EmitVolumeSetEvent(u16),
     SetAutoNormaliseAsAlbum(bool),
+    EmitSessionDisconnectedEvent {
+        connection_id: String,
+        user_name: String,
+    },
+    EmitSessionConnectedEvent {
+        connection_id: String,
+        user_name: String,
+    },
+    EmitSessionClientChangedEvent {
+        client_id: String,
+        client_name: String,
+        client_brand_name: String,
+        client_model_name: String,
+    },
+    EmitShuffleChangedEvent(bool),
+    EmitRepeatChangedEvent(bool),
+    EmitAutoPlayChangedEvent(bool),
     SkipExplicitContent(),
 }
 
@@ -122,19 +139,6 @@ pub enum PlayerEvent {
     Stopped {
         play_request_id: u64,
         track_id: SpotifyId,
-    },
-    // The player started working on playback of a track while it was in a stopped state.
-    // This is always immediately followed up by a "Loading" or "Playing" event.
-    Started {
-        play_request_id: u64,
-        track_id: SpotifyId,
-        position_ms: u32,
-    },
-    // Same as started but in the case that the player already had a track loaded.
-    // The player was either playing the loaded track or it was paused.
-    Changed {
-        old_track_id: SpotifyId,
-        new_track_id: SpotifyId,
     },
     // The player is delayed by loading a track.
     Loading {
@@ -157,14 +161,12 @@ pub enum PlayerEvent {
         play_request_id: u64,
         track_id: SpotifyId,
         position_ms: u32,
-        duration_ms: u32,
     },
     // The player entered a paused state.
     Paused {
         play_request_id: u64,
         track_id: SpotifyId,
         position_ms: u32,
-        duration_ms: u32,
     },
     // The player thinks it's a good idea to issue a preload command for the next track now.
     // This event is intended for use within spirc.
@@ -173,8 +175,7 @@ pub enum PlayerEvent {
         track_id: SpotifyId,
     },
     // The player reached the end of a track.
-    // This event is intended for use within spirc. Spirc will respond by issuing another command
-    // which will trigger another event (e.g. Changed or Stopped)
+    // This event is intended for use within spirc. Spirc will respond by issuing another command.
     EndOfTrack {
         play_request_id: u64,
         track_id: SpotifyId,
@@ -188,6 +189,40 @@ pub enum PlayerEvent {
     VolumeSet {
         volume: u16,
     },
+    PositionCorrection {
+        track_id: SpotifyId,
+        position_ms: u32,
+    },
+    Seeked {
+        track_id: SpotifyId,
+        position_ms: u32,
+    },
+    TrackChanged {
+        audio_item: Box<AudioItem>,
+    },
+    SessionConnected {
+        connection_id: String,
+        user_name: String,
+    },
+    SessionDisconnected {
+        connection_id: String,
+        user_name: String,
+    },
+    SessionClientChanged {
+        client_id: String,
+        client_name: String,
+        client_brand_name: String,
+        client_model_name: String,
+    },
+    ShuffleChanged {
+        shuffle: bool,
+    },
+    RepeatChanged {
+        repeat: bool,
+    },
+    AutoPlayChanged {
+        auto_play: bool,
+    },
 }
 
 impl PlayerEvent {
@@ -198,9 +233,6 @@ impl PlayerEvent {
                 play_request_id, ..
             }
             | Unavailable {
-                play_request_id, ..
-            }
-            | Started {
                 play_request_id, ..
             }
             | Playing {
@@ -218,7 +250,7 @@ impl PlayerEvent {
             | Stopped {
                 play_request_id, ..
             } => Some(*play_request_id),
-            Changed { .. } | Preloading { .. } | VolumeSet { .. } => None,
+            _ => None,
         }
     }
 }
@@ -370,12 +402,11 @@ impl Player {
         session: Session,
         volume_getter: Box<dyn VolumeGetter + Send>,
         sink_builder: F,
-    ) -> (Player, PlayerEventChannel)
+    ) -> Self
     where
         F: FnOnce() -> Box<dyn Sink> + Send + 'static,
     {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
 
         if config.normalisation {
             debug!("Normalisation Type: {:?}", config.normalisation_type);
@@ -421,7 +452,7 @@ impl Player {
                 sink_status: SinkStatus::Closed,
                 sink_event_callback: None,
                 volume_getter,
-                event_senders: [event_sender].to_vec(),
+                event_senders: vec![],
                 converter,
 
                 normalisation_peak: 0.0,
@@ -440,14 +471,11 @@ impl Player {
             debug!("PlayerInternal thread finished.");
         });
 
-        (
-            Player {
-                commands: Some(cmd_tx),
-                thread_handle: Some(handle),
-                play_request_id_generator: SeqGenerator::new(0),
-            },
-            event_receiver,
-        )
+        Self {
+            commands: Some(cmd_tx),
+            thread_handle: Some(handle),
+            play_request_id_generator: SeqGenerator::new(0),
+        }
     }
 
     fn command(&self, cmd: PlayerCommand) {
@@ -528,6 +556,47 @@ impl Player {
     pub fn skip_explicit_content(&self) {
         self.command(PlayerCommand::SkipExplicitContent());
     }
+
+    pub fn emit_session_connected_event(&self, connection_id: String, user_name: String) {
+        self.command(PlayerCommand::EmitSessionConnectedEvent {
+            connection_id,
+            user_name,
+        });
+    }
+
+    pub fn emit_session_disconnected_event(&self, connection_id: String, user_name: String) {
+        self.command(PlayerCommand::EmitSessionDisconnectedEvent {
+            connection_id,
+            user_name,
+        });
+    }
+
+    pub fn emit_session_client_changed_event(
+        &self,
+        client_id: String,
+        client_name: String,
+        client_brand_name: String,
+        client_model_name: String,
+    ) {
+        self.command(PlayerCommand::EmitSessionClientChangedEvent {
+            client_id,
+            client_name,
+            client_brand_name,
+            client_model_name,
+        });
+    }
+
+    pub fn emit_shuffle_changed_event(&self, shuffle: bool) {
+        self.command(PlayerCommand::EmitShuffleChangedEvent(shuffle));
+    }
+
+    pub fn emit_repeat_changed_event(&self, repeat: bool) {
+        self.command(PlayerCommand::EmitRepeatChangedEvent(repeat));
+    }
+
+    pub fn emit_auto_play_changed_event(&self, auto_play: bool) {
+        self.command(PlayerCommand::EmitAutoPlayChangedEvent(auto_play));
+    }
 }
 
 impl Drop for Player {
@@ -546,6 +615,7 @@ struct PlayerLoadedTrackData {
     decoder: Decoder,
     normalisation_data: NormalisationData,
     stream_loader_controller: StreamLoaderController,
+    audio_item: AudioItem,
     bytes_per_second: usize,
     duration_ms: u32,
     stream_position_ms: u32,
@@ -578,6 +648,7 @@ enum PlayerState {
         track_id: SpotifyId,
         play_request_id: u64,
         decoder: Decoder,
+        audio_item: AudioItem,
         normalisation_data: NormalisationData,
         normalisation_factor: f64,
         stream_loader_controller: StreamLoaderController,
@@ -592,6 +663,7 @@ enum PlayerState {
         play_request_id: u64,
         decoder: Decoder,
         normalisation_data: NormalisationData,
+        audio_item: AudioItem,
         normalisation_factor: f64,
         stream_loader_controller: StreamLoaderController,
         bytes_per_second: usize,
@@ -665,6 +737,7 @@ impl PlayerState {
                 stream_loader_controller,
                 stream_position_ms,
                 is_explicit,
+                audio_item,
                 ..
             } => {
                 *self = EndOfTrack {
@@ -674,6 +747,7 @@ impl PlayerState {
                         decoder,
                         normalisation_data,
                         stream_loader_controller,
+                        audio_item,
                         bytes_per_second,
                         duration_ms,
                         stream_position_ms,
@@ -699,6 +773,7 @@ impl PlayerState {
                 track_id,
                 play_request_id,
                 decoder,
+                audio_item,
                 normalisation_data,
                 normalisation_factor,
                 stream_loader_controller,
@@ -712,13 +787,15 @@ impl PlayerState {
                     track_id,
                     play_request_id,
                     decoder,
+                    audio_item,
                     normalisation_data,
                     normalisation_factor,
                     stream_loader_controller,
                     duration_ms,
                     bytes_per_second,
                     stream_position_ms,
-                    reported_nominal_start_time: None,
+                    reported_nominal_start_time: Instant::now()
+                        .checked_sub(Duration::from_millis(stream_position_ms as u64)),
                     suggested_to_preload_next_track,
                     is_explicit,
                 };
@@ -741,20 +818,22 @@ impl PlayerState {
                 track_id,
                 play_request_id,
                 decoder,
+                audio_item,
                 normalisation_data,
                 normalisation_factor,
                 stream_loader_controller,
                 duration_ms,
                 bytes_per_second,
                 stream_position_ms,
-                reported_nominal_start_time: _,
                 suggested_to_preload_next_track,
                 is_explicit,
+                ..
             } => {
                 *self = Paused {
                     track_id,
                     play_request_id,
                     decoder,
+                    audio_item,
                     normalisation_data,
                     normalisation_factor,
                     stream_loader_controller,
@@ -782,13 +861,13 @@ struct PlayerTrackLoader {
 }
 
 impl PlayerTrackLoader {
-    async fn find_available_alternative(&self, audio: AudioItem) -> Option<AudioItem> {
-        if let Err(e) = audio.availability {
+    async fn find_available_alternative(&self, audio_item: AudioItem) -> Option<AudioItem> {
+        if let Err(e) = audio_item.availability {
             error!("Track is unavailable: {}", e);
             None
-        } else if !audio.files.is_empty() {
-            Some(audio)
-        } else if let Some(alternatives) = &audio.alternatives {
+        } else if !audio_item.files.is_empty() {
+            Some(audio_item)
+        } else if let Some(alternatives) = &audio_item.alternatives {
             let alternatives: FuturesUnordered<_> = alternatives
                 .iter()
                 .map(|alt_id| AudioItem::get_file(&self.session, *alt_id))
@@ -827,7 +906,7 @@ impl PlayerTrackLoader {
         spotify_id: SpotifyId,
         position_ms: u32,
     ) -> Option<PlayerLoadedTrackData> {
-        let audio = match AudioItem::get_file(&self.session, spotify_id).await {
+        let audio_item = match AudioItem::get_file(&self.session, spotify_id).await {
             Ok(audio) => match self.find_available_alternative(audio).await {
                 Some(audio) => audio,
                 None => {
@@ -846,30 +925,8 @@ impl PlayerTrackLoader {
 
         info!(
             "Loading <{}> with Spotify URI <{}>",
-            audio.name, audio.spotify_uri
+            audio_item.name, audio_item.uri
         );
-
-        let is_explicit = audio.is_explicit;
-
-        if is_explicit {
-            if let Some(value) = self.session.get_user_attribute("filter-explicit-content") {
-                if &value == "1" {
-                    warn!("Track is marked as explicit, which client setting forbids.");
-                    return None;
-                }
-            }
-        }
-
-        if audio.duration < 0 {
-            error!(
-                "Track duration for <{}> cannot be {}",
-                spotify_id.to_uri().unwrap_or_default(),
-                audio.duration
-            );
-            return None;
-        }
-
-        let duration_ms = audio.duration as u32;
 
         // (Most) podcasts seem to support only 96 kbps Ogg Vorbis, so fall back to it
         let formats = match self.config.bitrate {
@@ -905,13 +962,16 @@ impl PlayerTrackLoader {
         let (format, file_id) =
             match formats
                 .iter()
-                .find_map(|format| match audio.files.get(format) {
+                .find_map(|format| match audio_item.files.get(format) {
                     Some(&file_id) => Some((*format, file_id)),
                     _ => None,
                 }) {
                 Some(t) => t,
                 None => {
-                    warn!("<{}> is not available in any supported format", audio.name);
+                    warn!(
+                        "<{}> is not available in any supported format",
+                        audio_item.name
+                    );
                     return None;
                 }
             };
@@ -1025,6 +1085,17 @@ impl PlayerTrackLoader {
                 }
             };
 
+            let duration_ms = audio_item.duration_ms;
+            // Don't try to seek past the track's duration.
+            // If the position is invalid just start from
+            // the beginning of the track.
+            let position_ms = if position_ms > duration_ms {
+                warn!("Invalid start position of {}ms exceeds track's duration of {}ms, starting track from the beginning", position_ms, duration_ms);
+                0
+            } else {
+                position_ms
+            };
+
             // Ensure the starting position. Even when we want to play from the beginning,
             // the cursor may have been moved by parsing normalisation data. This may not
             // matter for playback (but won't hurt either), but may be useful for the
@@ -1043,12 +1114,15 @@ impl PlayerTrackLoader {
             // Ensure streaming mode now that we are ready to play from the requested position.
             stream_loader_controller.set_stream_mode();
 
-            info!("<{}> ({} ms) loaded", audio.name, audio.duration);
+            let is_explicit = audio_item.is_explicit;
+
+            info!("<{}> ({} ms) loaded", audio_item.name, duration_ms);
 
             return Some(PlayerLoadedTrackData {
                 decoder,
                 normalisation_data,
                 stream_loader_controller,
+                audio_item,
                 bytes_per_second,
                 duration_ms,
                 stream_position_ms,
@@ -1169,7 +1243,6 @@ impl Future for PlayerInternal {
                     normalisation_factor,
                     ref mut stream_position_ms,
                     ref mut reported_nominal_start_time,
-                    duration_ms,
                     ..
                 } = self.state
                 {
@@ -1231,11 +1304,9 @@ impl Future for PlayerInternal {
                                             if notify_about_position {
                                                 *reported_nominal_start_time =
                                                     now.checked_sub(new_stream_position);
-                                                self.send_event(PlayerEvent::Playing {
+                                                self.send_event(PlayerEvent::PositionCorrection {
                                                     track_id,
-                                                    play_request_id,
                                                     position_ms: new_stream_position_ms as u32,
-                                                    duration_ms,
                                                 });
                                             }
                                         }
@@ -1401,7 +1472,6 @@ impl PlayerInternal {
             track_id,
             play_request_id,
             stream_position_ms,
-            duration_ms,
             ..
         } = self.state
         {
@@ -1410,7 +1480,6 @@ impl PlayerInternal {
                 track_id,
                 play_request_id,
                 position_ms: stream_position_ms,
-                duration_ms,
             });
             self.ensure_sink_running();
         } else {
@@ -1423,7 +1492,6 @@ impl PlayerInternal {
             track_id,
             play_request_id,
             stream_position_ms,
-            duration_ms,
             ..
         } = self.state
         {
@@ -1434,7 +1502,6 @@ impl PlayerInternal {
                 track_id,
                 play_request_id,
                 position_ms: stream_position_ms,
-                duration_ms,
             });
         } else {
             error!("Player::pause called from invalid state: {:?}", self.state);
@@ -1592,6 +1659,10 @@ impl PlayerInternal {
         loaded_track: PlayerLoadedTrackData,
         start_playback: bool,
     ) {
+        let audio_item = Box::new(loaded_track.audio_item.clone());
+
+        self.send_event(PlayerEvent::TrackChanged { audio_item });
+
         let position_ms = loaded_track.stream_position_ms;
 
         let mut config = self.config.clone();
@@ -1607,18 +1678,17 @@ impl PlayerInternal {
 
         if start_playback {
             self.ensure_sink_running();
-
             self.send_event(PlayerEvent::Playing {
                 track_id,
                 play_request_id,
                 position_ms,
-                duration_ms: loaded_track.duration_ms,
             });
 
             self.state = PlayerState::Playing {
                 track_id,
                 play_request_id,
                 decoder: loaded_track.decoder,
+                audio_item: loaded_track.audio_item,
                 normalisation_data: loaded_track.normalisation_data,
                 normalisation_factor,
                 stream_loader_controller: loaded_track.stream_loader_controller,
@@ -1637,6 +1707,7 @@ impl PlayerInternal {
                 track_id,
                 play_request_id,
                 decoder: loaded_track.decoder,
+                audio_item: loaded_track.audio_item,
                 normalisation_data: loaded_track.normalisation_data,
                 normalisation_factor,
                 stream_loader_controller: loaded_track.stream_loader_controller,
@@ -1651,7 +1722,6 @@ impl PlayerInternal {
                 track_id,
                 play_request_id,
                 position_ms,
-                duration_ms: loaded_track.duration_ms,
             });
         }
     }
@@ -1666,38 +1736,12 @@ impl PlayerInternal {
         if !self.config.gapless {
             self.ensure_sink_stopped(play);
         }
-        // emit the correct player event
-        match self.state {
-            PlayerState::Playing {
-                track_id: old_track_id,
-                ..
-            }
-            | PlayerState::Paused {
-                track_id: old_track_id,
-                ..
-            }
-            | PlayerState::EndOfTrack {
-                track_id: old_track_id,
-                ..
-            }
-            | PlayerState::Loading {
-                track_id: old_track_id,
-                ..
-            } => self.send_event(PlayerEvent::Changed {
-                old_track_id,
-                new_track_id: track_id,
-            }),
-            PlayerState::Stopped => self.send_event(PlayerEvent::Started {
-                track_id,
-                play_request_id,
-                position_ms,
-            }),
-            PlayerState::Invalid { .. } => {
-                return Err(Error::internal(format!(
-                    "Player::handle_command_load called from invalid state: {:?}",
-                    self.state
-                )));
-            }
+
+        if matches!(self.state, PlayerState::Invalid { .. }) {
+            return Err(Error::internal(format!(
+                "Player::handle_command_load called from invalid state: {:?}",
+                self.state
+            )));
         }
 
         // Now we check at different positions whether we already have a pre-loaded version
@@ -1759,6 +1803,7 @@ impl PlayerInternal {
                 if let PlayerState::Playing {
                     stream_position_ms,
                     decoder,
+                    audio_item,
                     stream_loader_controller,
                     bytes_per_second,
                     duration_ms,
@@ -1769,6 +1814,7 @@ impl PlayerInternal {
                 | PlayerState::Paused {
                     stream_position_ms,
                     decoder,
+                    audio_item,
                     stream_loader_controller,
                     bytes_per_second,
                     duration_ms,
@@ -1781,6 +1827,7 @@ impl PlayerInternal {
                         decoder,
                         normalisation_data,
                         stream_loader_controller,
+                        audio_item,
                         bytes_per_second,
                         duration_ms,
                         stream_position_ms,
@@ -1930,14 +1977,21 @@ impl PlayerInternal {
                 Ok(new_position_ms) => {
                     if let PlayerState::Playing {
                         ref mut stream_position_ms,
+                        track_id,
                         ..
                     }
                     | PlayerState::Paused {
                         ref mut stream_position_ms,
+                        track_id,
                         ..
                     } = self.state
                     {
                         *stream_position_ms = new_position_ms;
+
+                        self.send_event(PlayerEvent::Seeked {
+                            track_id,
+                            position_ms: new_position_ms,
+                        });
                     }
                 }
                 Err(e) => error!("PlayerInternal::handle_command_seek error: {}", e),
@@ -1950,35 +2004,12 @@ impl PlayerInternal {
         self.preload_data_before_playback()?;
 
         if let PlayerState::Playing {
-            track_id,
-            play_request_id,
             ref mut reported_nominal_start_time,
-            duration_ms,
             ..
         } = self.state
         {
             *reported_nominal_start_time =
                 Instant::now().checked_sub(Duration::from_millis(position_ms as u64));
-            self.send_event(PlayerEvent::Playing {
-                track_id,
-                play_request_id,
-                position_ms,
-                duration_ms,
-            });
-        }
-        if let PlayerState::Paused {
-            track_id,
-            play_request_id,
-            duration_ms,
-            ..
-        } = self.state
-        {
-            self.send_event(PlayerEvent::Paused {
-                track_id,
-                play_request_id,
-                position_ms,
-                duration_ms,
-            });
         }
 
         Ok(())
@@ -2011,6 +2042,46 @@ impl PlayerInternal {
             PlayerCommand::EmitVolumeSetEvent(volume) => {
                 self.send_event(PlayerEvent::VolumeSet { volume })
             }
+
+            PlayerCommand::EmitRepeatChangedEvent(repeat) => {
+                self.send_event(PlayerEvent::RepeatChanged { repeat })
+            }
+
+            PlayerCommand::EmitShuffleChangedEvent(shuffle) => {
+                self.send_event(PlayerEvent::ShuffleChanged { shuffle })
+            }
+
+            PlayerCommand::EmitAutoPlayChangedEvent(auto_play) => {
+                self.send_event(PlayerEvent::AutoPlayChanged { auto_play })
+            }
+
+            PlayerCommand::EmitSessionClientChangedEvent {
+                client_id,
+                client_name,
+                client_brand_name,
+                client_model_name,
+            } => self.send_event(PlayerEvent::SessionClientChanged {
+                client_id,
+                client_name,
+                client_brand_name,
+                client_model_name,
+            }),
+
+            PlayerCommand::EmitSessionConnectedEvent {
+                connection_id,
+                user_name,
+            } => self.send_event(PlayerEvent::SessionConnected {
+                connection_id,
+                user_name,
+            }),
+
+            PlayerCommand::EmitSessionDisconnectedEvent {
+                connection_id,
+                user_name,
+            } => self.send_event(PlayerEvent::SessionDisconnected {
+                connection_id,
+                user_name,
+            }),
 
             PlayerCommand::SetAutoNormaliseAsAlbum(setting) => {
                 self.auto_normalise_as_album = setting
@@ -2138,7 +2209,7 @@ impl Drop for PlayerInternal {
 
 impl fmt::Debug for PlayerCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
             PlayerCommand::Load {
                 track_id,
                 play,
@@ -2162,13 +2233,53 @@ impl fmt::Debug for PlayerCommand {
                 f.debug_tuple("SetSinkEventCallback").finish()
             }
             PlayerCommand::EmitVolumeSetEvent(volume) => {
-                f.debug_tuple("VolumeSet").field(&volume).finish()
+                f.debug_tuple("EmitVolumeSetEvent").field(&volume).finish()
             }
             PlayerCommand::SetAutoNormaliseAsAlbum(setting) => f
                 .debug_tuple("SetAutoNormaliseAsAlbum")
                 .field(&setting)
                 .finish(),
             PlayerCommand::SkipExplicitContent() => f.debug_tuple("SkipExplicitContent").finish(),
+            PlayerCommand::EmitSessionConnectedEvent {
+                connection_id,
+                user_name,
+            } => f
+                .debug_tuple("EmitSessionConnectedEvent")
+                .field(&connection_id)
+                .field(&user_name)
+                .finish(),
+            PlayerCommand::EmitSessionDisconnectedEvent {
+                connection_id,
+                user_name,
+            } => f
+                .debug_tuple("EmitSessionDisconnectedEvent")
+                .field(&connection_id)
+                .field(&user_name)
+                .finish(),
+            PlayerCommand::EmitSessionClientChangedEvent {
+                client_id,
+                client_name,
+                client_brand_name,
+                client_model_name,
+            } => f
+                .debug_tuple("EmitSessionClientChangedEvent")
+                .field(&client_id)
+                .field(&client_name)
+                .field(&client_brand_name)
+                .field(&client_model_name)
+                .finish(),
+            PlayerCommand::EmitShuffleChangedEvent(shuffle) => f
+                .debug_tuple("EmitShuffleChangedEvent")
+                .field(&shuffle)
+                .finish(),
+            PlayerCommand::EmitRepeatChangedEvent(repeat) => f
+                .debug_tuple("EmitRepeatChangedEvent")
+                .field(&repeat)
+                .finish(),
+            PlayerCommand::EmitAutoPlayChangedEvent(auto_play) => f
+                .debug_tuple("EmitAutoPlayChangedEvent")
+                .field(&auto_play)
+                .finish(),
         }
     }
 }
