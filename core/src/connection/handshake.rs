@@ -76,16 +76,18 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
         )
     })?;
 
-    let hash = Sha1::digest(&remote_key);
-    let padding = rsa::padding::PaddingScheme::new_pkcs1v15_sign(Some(rsa::hash::Hash::SHA1));
-    public_key
-        .verify(padding, &hash, &remote_signature)
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                HandshakeError::VerificationFailed,
-            )
-        })?;
+    {
+        let hash = Sha1::digest(&remote_key);
+        let padding = rsa::padding::PaddingScheme::new_pkcs1v15_sign(Some(rsa::hash::Hash::SHA1));
+        public_key
+            .verify(padding, &hash, &remote_signature)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    HandshakeError::VerificationFailed,
+                )
+            })?;
+    }
 
     // OK to proceed
     let shared_secret = local_keys.shared_secret(&remote_key);
